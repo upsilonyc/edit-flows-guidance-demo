@@ -317,7 +317,7 @@ print(f"  Learning rate: {optim.defaults['lr']}")
 
 # Helper functions for training the model
 
-from utils import * # noqa
+from utils.utils import * # noqa
 from flow import KappaScheduler, Coupling, EmptyCoupling, sample_p
 
 def sample_cond_pt(p0: torch.Tensor, p1: torch.Tensor, t: torch.Tensor, kappa: KappaScheduler):

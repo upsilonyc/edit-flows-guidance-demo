@@ -140,7 +140,7 @@ class CubicScheduler(KappaScheduler):
 
 
 if __name__ == "__main__":
-    from utils import pretty_parse
+    from utils.utils import pretty_parse
 
     coupling = ExtendedCoupling(n_insert=10, vocab_size=128, pad_token=129)
     
