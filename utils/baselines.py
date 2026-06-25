@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from ..main import *
+# from main import min_seq_len, max_seq_len, make_batch, V, coupling, seq_align_fn, num_cycles_fn, x_int_fn
 from Levenshtein import distance
 
 EPS = 1e-12
@@ -39,15 +39,15 @@ def edit_distance_metrics(x, y):
 
 # ===== unused utils functions =====
 # 1. generate target_y
-def _make_target_sequence() -> torch.Tensor:
-    _, x_1, _, _, _, _ = make_batch(
-        batch_size=1,
-        min_length=min_seq_len,
-        max_length=max_seq_len,
-        vocab_size=V,
-        coupling=coupling,
-        seq_align_fn=seq_align_fn,
-        num_cycles_fn=num_cycles_fn,
-        x_int_fn=x_int_fn,
-    )
-    return x_1[0].detach().cpu()
+# def make_target_sequence() -> torch.Tensor:
+#     _, x_1, _, _, _, _ = make_batch(
+#         batch_size=1,
+#         min_length=min_seq_len,
+#         max_length=max_seq_len,
+#         vocab_size=V,
+#         coupling=coupling,
+#         seq_align_fn=seq_align_fn,
+#         num_cycles_fn=num_cycles_fn,
+#         x_int_fn=x_int_fn,
+#     )
+#     return x_1[0].detach().cpu()
