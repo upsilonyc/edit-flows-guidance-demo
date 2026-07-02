@@ -23,6 +23,35 @@ def tokens_to_lev_string(tokens):
 
 # 2. sampling
 
+def generate_line_y(k=0.5, b=0, V = 128, noise_level=0.05, size=128):
+    x = torch.arange(size, dtype=torch.float32)
+    y = k * x + b
+    y = (y - y.min()) / (y.max() - y.min() + EPS)
+    y = y * V
+    if noise_level > 0:
+        noise = torch.randn_like(y) * noise_level  # independent noise per token
+        y = y + noise
+    return y
+
+def generate_quadratic_y(a=1, b=1, c=0, V = 128, noise_level=0.05, size=128):
+    x = torch.arange(size, dtype=torch.float32)
+    y = a * x**2 + b * x + c
+    y = (y - y.min()) / (y.max() - y.min() + EPS)
+    y = y * V
+    if noise_level > 0:
+        y += noise_level * torch.randn_like(y)
+    return y
+
+def generate_sine_y(B=0.3, C=None, amplitude=0.5, offset=0.5, noise_level=0.05, size=128):
+    # range in make_sinusoidal_sequence: B [0.75, 1.85] C [0, 2pi]
+    if C is None:
+        C = np.random.uniform(0,2*np.pi)
+    x = torch.linspace(0, 4 * np.pi, size, dtype=torch.float32)
+    y = amplitude * torch.sin(B * (x - C)) + offset
+    if noise_level > 0:
+        y += noise_level * torch.randn_like(y)
+    return y
+
 def effective_sample_size(normalized_w: torch.Tensor) -> float:
     return float(1.0 / (normalized_w.pow(2).sum().item() + EPS))
 

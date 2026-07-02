@@ -7,3 +7,4 @@ torchtyping==0.1.5
 tqdm==4.67.1
 IPython
 Leveinshtein
+tslearn
