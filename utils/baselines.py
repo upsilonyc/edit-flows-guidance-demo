@@ -63,7 +63,7 @@ def edit_distance_metrics(x, y):
     x_str = tokens_to_lev_string(x_tokens)
     y_str = tokens_to_lev_string(y_tokens)
     d = float(distance(x_str, y_str))
-    denom = float(max(len(x_str), len(y_str), 1))
+    denom = 256
     return d, d / denom
 
 # ===== unused utils functions =====
