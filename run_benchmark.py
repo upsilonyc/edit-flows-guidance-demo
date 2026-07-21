@@ -600,11 +600,11 @@ save_model = False
 load_model = True
 overwrite = True
 
-save_dir = Path(f"results")
+# save_dir = Path(f"results")
 model_name = Path(f"checkpoint.pt") # MODIFIED. previous: seq2seq_prior.pt
 
 if save_model:
-    save_path = save_dir / model_name
+    save_path = model_name
     if not overwrite:
         assert not save_path.exists(), f"Model file {save_path} already exists. Please choose a different name."
     assert save_path.parent.exists(), f"Directory {save_path.parent} does not exist. Please create it first."
@@ -622,7 +622,7 @@ if save_model:
     print(f"Model saved to {save_path}")
 
 if load_model:
-    save_path = save_dir / model_name
+    save_path = model_name
     assert save_path.exists(), f"Model file {save_path} does not exist."
     model, optim = load_model_state(str(save_path))
     print(f"Model loaded from {save_path}")
@@ -709,6 +709,7 @@ import time
 from utils.baselines import *
 from typing import Callable, Dict, Optional
 import pandas as pd
+import json
 
 def make_target_pair():
     """Return (x0, x1) from the same coupling sample in make_batch()."""
@@ -902,20 +903,6 @@ def sample(
     }
     return result
 
-
-# %%
-# optional: visualize x1
-# import matplotlib.pyplot as plt
-# from utils.baselines import trim_pad
-# xs = np.linspace(0, 128, 128)
-# y = trim_pad(target_y)
-# values = np.asarray(y, dtype=float)
-# fig, ax = plt.subplots(figsize=(10, 4))
-# ax.scatter(xs, values)
-# ax.set_axis_off()
-# fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
-# plt.show()
-
 # %%
 # key utils and algorithms for guidance baselines
 def best_of_k(
@@ -991,7 +978,7 @@ def bootstrap_smc_sample(
 
     executor = ThreadPoolExecutor(max_workers=n_workers) if n_workers > 1 else None
     try:
-        curr_reward = _batch_rewards(particles, reward_power=1)
+        curr_reward = _batch_rewards(particles, reward_power=1)  # keep raw reward (r^1) throughout
 
         while t.max().item() <= (1.0 - default_h):
             particles, t, step_lp = _ctmc_step(
@@ -1006,10 +993,11 @@ def bootstrap_smc_sample(
                 step_lp = torch.zeros(n_particles)
             traj_logprob += step_lp
 
-            next_reward = _batch_rewards(particles, reward_power=beta)
+            next_reward = _batch_rewards(particles, reward_power=1)  # raw r_next
 
-            logw += torch.log(next_reward + EPS) - torch.log(curr_reward + EPS) # update weights: W' = r(x_next) / r(x_curr)
-            curr_reward = next_reward
+            # Weight ratio: r(x_next)^beta / r(x_curr)^beta — apply beta only here
+            logw += torch.log(next_reward.pow(beta) + EPS) - torch.log(curr_reward.pow(beta) + EPS)
+            curr_reward = next_reward  # always raw reward
 
             max_logw = torch.max(logw)
             w = torch.exp(logw - max_logw)
@@ -1033,7 +1021,7 @@ def bootstrap_smc_sample(
     return {
         "final": particles[chosen_idx].clone(),
         "logprob": float(traj_logprob[chosen_idx].item()),
-        "reward": float(curr_reward[chosen_idx].item()),
+        "reward": float(curr_reward[chosen_idx].item()),  # raw reward (r^1)
         "time": float(time.perf_counter() - start),
     }
 
@@ -1146,89 +1134,6 @@ def exact_guidance_u(
         ins_probs_guided,
         sub_probs_guided,
     )
-
-# def benchmark_methods(
-#     N_eval: int = 30,
-#     n_steps: int = 1000,
-#     n_particles: int = 8,
-#     alpha: int = 10,
-#     max_rejection_attempts: int = 20,
-#     show_progress: bool = True,
-#     beta: int = 5, # reward sharpening
-#     target_y: torch.Tensor = target_y
-#     ):
-#     rows = []
-#     methods = ["unguided", "best_of_k", "bootstrap_smc","exact_guidance_u"]
-#     # eval_pairs = [make_target_pair() for _ in range(N_eval)]
-#     eval_pairs = [[paired_x0, target_y] for _ in range(N_eval)]
-
-#     for method in methods:
-#         times, rewards, logprobs, edit_ds, norm_edit_ds = [], [], [], [], []
-#         iterator = tqdm(eval_pairs, desc=f"Benchmark: {method}", leave=False) if show_progress else eval_pairs
-
-#         for x0_pair, x1_pair in iterator:
-#             target_pair_y = x1_pair
-#             initial_pair_x = x0_pair.unsqueeze(0)
-#             if method == "unguided":
-#                 t0 = time.perf_counter()
-#                 out = sample(
-#                     guidance=None,
-#                     return_logprob=True,
-#                     target_y=target_pair_y,
-        #             n_samples=1,
-        #             n_steps=n_steps,
-        #             initial_x=initial_pair_x,
-        #         )
-        #         elapsed = time.perf_counter() - t0
-        #         x_final = out["final"][0]
-        #         lp = float(out["logprob"][0].item())
-        #         r = float(edit_distance_reward(x_final, target_pair_y, alpha=alpha))
-
-        #     elif method == "best_of_k":
-        #         out = best_of_k(target_y=target_pair_y, initial_x=initial_pair_x, n_steps=n_steps,
-        #             alpha=alpha, max_attempts=max_rejection_attempts)
-        #         elapsed = out["time"]
-        #         x_final = out["final"]
-        #         lp = out["logprob"]
-        #         r = out["reward"]
-
-        #     elif method == "bootstrap_smc":
-        #         out = bootstrap_smc_sample(target_y=target_pair_y, initial_x=initial_pair_x, n_particles=n_particles,
-        #             n_steps=n_steps, ess_threshold=n_particles / 2, alpha=alpha, beta=beta)
-        #         elapsed = out["time"]
-        #         x_final = out["final"]
-        #         lp = out["logprob"]
-        #         r = out["reward"]
-
-        #     else: # exact guidance
-        #         t0 = time.perf_counter()
-        #         out = sample(
-        #             guidance=exact_guidance_u, return_logprob=True, target_y=target_pair_y,
-        #             n_samples=1, n_steps=n_steps, initial_x=initial_pair_x, beta=beta)
-        #         elapsed = time.perf_counter() - t0
-        #         x_final = out["final"][0]
-        #         lp = float(out["logprob"][0].item())
-        #         r = float(edit_distance_reward(x_final, target_pair_y, alpha=alpha))
-
-        #     d, d_norm = edit_distance_metrics(x_final, target_pair_y)
-        #     times.append(float(elapsed))
-        #     rewards.append(float(r))
-        #     logprobs.append(float(lp))
-        #     edit_ds.append(float(d))
-        #     norm_edit_ds.append(float(d_norm))
-
-        # rows.append(
-        #     {
-        #         "method": method,
-        #         "avg_time": float(np.mean(times)),
-        #         "avg_reward": float(np.mean(rewards)),
-        #         "avg_logprob": float(np.mean(logprobs)),
-        #         "avg_edit_distance": float(np.mean(edit_ds)),
-        #         "avg_normalized_edit_distance": float(np.mean(norm_edit_ds)),
-        #     }
-        # )
-
-    # return pd.DataFrame(rows)
 
 # %%
 # Extended evaluation helpers (single-pass metrics + optional trajectory capture)
@@ -1443,13 +1348,25 @@ def benchmark_methods(
 import matplotlib.pyplot as plt
 
 N_eval = 20
-n_steps = 140
+n_steps = 280
 n_particles_eval = 10
-betas = [10]
+betas = [10, 20]
+_, in_dis_y, _, _, _, _ = make_batch(
+        batch_size=batch_size,
+        min_length=min_seq_len,
+        max_length=max_seq_len,
+        vocab_size=V,
+        coupling=coupling,
+        seq_align_fn=seq_align_fn,
+        num_cycles_fn=num_cycles_fn,
+        x_int_fn=x_int_fn,
+    )
+in_dis_y = in_dis_y[0].detach().cpu()
 ys = [
-    ("Linear", generate_line_y()),
-    ("OOD Sine", generate_sine_y()),
+    ("In-Distribution", in_dis_y),
+    ("Linear", generate_line_y())
 ]
+    # ("OOD Sine", generate_sine_y()),
 
 results_dfs = []
 all_summary_dfs = []
@@ -1488,101 +1405,73 @@ for target_name, y_target in ys:
 
 summary_results_df = pd.concat(all_summary_dfs, ignore_index=True)
 trial_results_df = pd.concat(all_trial_dfs, ignore_index=True)
-summary_results_df.to_csv('summary.csv', index=False)
-trial_results_df.to_csv('trials.csv', index=False)
+summary_results_df.to_csv('summary_280.csv', index=False)
+trial_results_df.to_csv('trials_280.csv', index=False)
 
 # %%
-# 16 figures total: 4 methods x 2 betas x 2 targets, each with reward/edit-distance boxplots
-for method_key, method_label in METHOD_SPECS:
+# Save sequences for visualization:
+def _tokens_no_pad(x: torch.Tensor) -> list[int]:
+    x_cpu = x.detach().cpu()
+    if x_cpu.ndim > 1:
+        x_cpu = x_cpu[0]
+    flat = x_cpu.reshape(-1)
+    return [int(tok) for tok in flat.tolist() if int(tok) != PAD_TOKEN]
+
+
+def _sequence_target_label(target_name: str) -> str:
+    if target_name == "In-Distribution":
+        return "in_dis_y"
+    return target_name
+
+
+representative_rows = []
+representative_rows.append(
+    {
+        "record_type": "x0",
+        "method_key": "",
+        "method": "",
+        "beta": "",
+        "target": "shared",
+        "sequence_json": json.dumps(_tokens_no_pad(paired_x0)),
+    }
+)
+
+for target_name, y_target in ys:
+    target_label = _sequence_target_label(target_name)
+    representative_rows.append(
+        {
+            "record_type": "target",
+            "method_key": "",
+            "method": "",
+            "beta": "",
+            "target": target_label,
+            "sequence_json": json.dumps(_tokens_no_pad(y_target)),
+        }
+    )
+
     for b in betas:
-        for target_name, _ in ys:
-            subset = trial_results_df[
-                (trial_results_df["method"] == method_label)
-                & (trial_results_df["beta"] == b)
-                & (trial_results_df["target"] == target_name)
-            ]
+        for method_key, method_label in METHOD_SPECS:
+            representative_trial = run_single_trial(
+                method_key=method_key,
+                target_pair_y=y_target,
+                initial_pair_x=paired_x0.unsqueeze(0),
+                n_steps=n_steps,
+                n_particles=n_particles_eval,
+                alpha=1,
+                max_rejection_attempts=10,
+                beta=b,
+                return_trajectory=False,
+            )
+            representative_rows.append(
+                {
+                    "record_type": "generated",
+                    "method_key": method_key,
+                    "method": method_label,
+                    "beta": int(b),
+                    "target": target_label,
+                    "sequence_json": json.dumps(_tokens_no_pad(representative_trial["x_final"])),
+                }
+            )
 
-            fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
-            fig.suptitle(f"{method_label} | beta={b} | target={target_name}")
-
-            axes[0].boxplot(subset["reward"].to_numpy())
-            axes[0].set_title("Reward Distribution")
-            axes[0].set_xlabel("Trials")
-            axes[0].set_ylabel("Reward")
-            axes[0].grid(True, alpha=0.3)
-
-            axes[1].boxplot(subset["edit_distance"].to_numpy())
-            axes[1].set_title("Edit Distance Distribution")
-            axes[1].set_xlabel("Trials")
-            axes[1].set_ylabel("Edit Distance")
-            axes[1].grid(True, alpha=0.3)
-
-            fig.tight_layout(rect=[0, 0, 1, 0.92])
-
-# plt.show()
-plt.savefig('benchmark_1.png')
-
-# %%
-# Quick test
-
-# smoke_df = benchmark_methods(
-#     N_eval=2,
-#     n_steps=10,
-#     n_particles=4,
-#     alpha=1,
-#     max_rejection_attempts=10,
-#     show_progress=False,
-#     beta=5
-# )
-# smoke_df
-
-# %%
-# # Video animation from cached trajectory (Exact Guidance, beta=15, OOD Sine)
-# from matplotlib.animation import FuncAnimation
-# from matplotlib.artist import Artist
-# from matplotlib.axes import Axes
-# from pathlib import Path
-# from typing import Any, cast
-
-# assert trajectory_artifact is not None, "Run the evaluation cell first to populate trajectory_artifact."
-
-# artifact = cast(dict[str, Any], trajectory_artifact)
-# x_ts = cast(list[torch.Tensor], artifact["trajectory"])
-# assert x_ts is not None and len(x_ts) > 0, "No cached trajectory found in trajectory_artifact."
-
-# n_samples = int(x_ts[0].shape[0])
-# fig, axes = plt.subplots(1, n_samples, figsize=(6 * n_samples, 6), sharey=True)
-# axes_arr = np.atleast_1d(axes).ravel()
-# axes_list = [cast(Axes, ax) for ax in axes_arr]
-
-
-# def update_all(frame: int) -> list[Artist]:
-#     artists: list[Artist] = []
-#     for sample_idx in range(n_samples):
-#         ax = axes_list[sample_idx]
-#         ax.clear()
-#         y = x_ts[frame][sample_idx].detach().cpu().numpy().squeeze()
-#         y = y[y != PAD_TOKEN]  # Remove padding token
-#         x = np.arange(len(y))
-#         points = ax.scatter(x, y, s=10)
-#         ax.set_title(f"Sample {sample_idx} - Step {frame}")
-#         ax.set_xlabel("Index")
-#         ax.set_ylabel("Token Value")
-#         ax.grid(True, alpha=0.3)
-#         ax.legend([f"Time Step: {frame}"])
-#         artists.append(points)
-#     return artists
-
-
-# anim = FuncAnimation(fig, update_all, frames=len(x_ts), repeat=False, interval=100)
-
-# out_dir = Path("results")
-# out_dir.mkdir(parents=True, exist_ok=True)
-# out_path = out_dir / "exact_guidance_beta15_ood_sine.mp4"
-# anim.save(str(out_path), writer="ffmpeg", fps=max(1, len(x_ts) // 10))
-# plt.close(fig)
-
-# print(f"Saved trajectory video to {out_path}")
-# out_path
-
-
+sequences_df = pd.DataFrame(representative_rows)
+sequences_df.to_csv("sequences_280.csv", index=False)
