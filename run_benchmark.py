@@ -371,7 +371,8 @@ def make_batch(
     for length in lengths:
         _x1 = torch.Tensor(make_sinusoidal_sequence(length, noise=noise, **kwargs))
         _x1 = torch.round(torch.clip(_x1 * vocab_size, min=0.0, max=vocab_size-1)).long().unsqueeze(0)
-        _x0, _ = coupling.sample(_x1)
+        # _x0, _ = coupling.sample(_x1)
+        _x0 = torch.empty((1, 0), dtype=_x1.dtype, device=_x1.device)
         _z0, _z1 = seq_align_fn(_x0, _x1)
         x_1.append(_x1.squeeze(0))
         x_0.append(_x0.squeeze(0))
