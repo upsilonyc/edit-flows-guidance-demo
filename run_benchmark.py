@@ -725,7 +725,18 @@ def make_target_pair():
     )
     return x0[0].detach().cpu(), x1[0].detach().cpu()
 
-paired_x0 = make_x0_with_bounds(batch_size=batch_size, min_length=min_seq_len, max_length=max_seq_len)[0]
+# paired_x0 = make_x0_with_bounds(batch_size=batch_size, min_length=min_seq_len, max_length=max_seq_len)[0]
+paired_x0, _, _, _, _, _ = make_batch(
+        batch_size=1,
+        min_length=min_seq_len,
+        max_length=max_seq_len,
+        vocab_size=V,
+        coupling=coupling,
+        seq_align_fn=seq_align_fn,
+        num_cycles_fn=num_cycles_fn,
+        x_int_fn=x_int_fn,
+    )
+paired_x0 = paired_x0[0]
 target_y = generate_quadratic_y()
 # paired_x0, target_y = make_target_pair()
 
@@ -1350,7 +1361,7 @@ import matplotlib.pyplot as plt
 N_eval = 20
 n_steps = 280
 n_particles_eval = 10
-betas = [10, 20]
+betas = [5, 10]
 _, in_dis_y, _, _, _, _ = make_batch(
         batch_size=batch_size,
         min_length=min_seq_len,
