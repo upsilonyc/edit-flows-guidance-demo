@@ -737,7 +737,7 @@ paired_x0, _, _, _, _, _ = make_batch(
         num_cycles_fn=num_cycles_fn,
         x_int_fn=x_int_fn,
     )
-paired_x0 = paired_x0[0]
+paired_x0 = paired_x0[0].detach().cpu()
 target_y = generate_quadratic_y()
 # paired_x0, target_y = make_target_pair()
 
@@ -1362,7 +1362,7 @@ import matplotlib.pyplot as plt
 N_eval = 20
 n_steps = 280
 n_particles_eval = 10
-betas = [5, 10]
+betas = [10, 20]
 _, in_dis_y, _, _, _, _ = make_batch(
         batch_size=batch_size,
         min_length=min_seq_len,
