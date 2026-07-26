@@ -2,8 +2,8 @@ import torch
 import torch.nn.functional as F
 from typing import List, Tuple
 
-BOS_TOKEN = 128
-PAD_TOKEN = 129
+PAD_TOKEN = 128
+BOS_TOKEN = 129
 GAP_TOKEN = 130
 
 

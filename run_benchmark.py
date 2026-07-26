@@ -769,6 +769,7 @@ def _ctmc_step(
     guidance: Optional[Callable] = None,
     target_y: Optional[torch.Tensor] = None,
     return_logprob: bool = False,
+    alpha: int = 5,
     beta: int = 5
 ):
     """Single Euler-CTMC step shared by all methods."""
@@ -797,7 +798,8 @@ def _ctmc_step(
             ins_probs,
             sub_probs,
             target_y,
-            beta
+            alpha=alpha,
+            beta=beta,
         )
         if isinstance(guided, (tuple, list)) and len(guided) == 3: # exact_guidance_lambda
             lambda_ins, lambda_sub, lambda_del = guided
@@ -875,6 +877,7 @@ def sample(
     n_steps: int = 1000,
     initial_x: Optional[torch.Tensor] = None,
     return_trajectory: bool = False,
+    alpha: int = 5,  # reward function parameter for guidance
     beta: int = 5 # reward sharpening
 ):
     """Shared sampler for unguided and guided inference, from x0 to x1."""
@@ -901,6 +904,7 @@ def sample(
             guidance=guidance,
             target_y=target_y,
             return_logprob=return_logprob,
+            alpha=alpha,
             beta = beta
         )
         if return_trajectory:
@@ -928,7 +932,7 @@ def best_of_k(
     start, best = time.perf_counter(), None
     for attempts in range(1, max_attempts + 1):
         out = sample(guidance=None, return_logprob=True, target_y=target_y, n_samples=1, 
-                     n_steps=n_steps, initial_x=initial_x, return_trajectory=False)
+                     n_steps=n_steps, initial_x=initial_x, return_trajectory=False, alpha=alpha)
         x_final = out["final"][0]
         r = float(edit_distance_reward(x_final, target_y, alpha=alpha))
         lp = float(out["logprob"][0].item())
@@ -937,9 +941,6 @@ def best_of_k(
                 "logprob": lp,
                 "reward": r,
                 "attempts": attempts}
-        # if np.random.rand() < r:
-        #     return {"final": x_final,"logprob": lp,"reward": r,"time": float(time.perf_counter() - start),
-        #               "attempts": attempts,"accepted": True}
     return {"final": best["final"], # type: ignore
         "logprob": best["logprob"], # type: ignore
         "reward": best["reward"], # type: ignore
@@ -956,7 +957,7 @@ def bootstrap_smc_sample(
     alpha: int = 5,
     beta: int = 5
 ):
-    """Bootstrap SMC with q=p, starting all particles from the same paired initial_x."""
+    """Bootstrap SMC using the base model as the proposal, starting all particles from the same paired initial_x."""
     from concurrent.futures import ThreadPoolExecutor
     import os
     if ess_threshold is None:
@@ -1000,6 +1001,8 @@ def bootstrap_smc_sample(
                 guidance=None,
                 target_y=target_y,
                 return_logprob=True,
+                alpha=alpha,
+                beta=beta,
             )
             if step_lp is None:
                 step_lp = torch.zeros(n_particles)
@@ -1153,7 +1156,7 @@ from typing import Any
 
 METHOD_SPECS = [
     ("unguided", "Unguided"),
-    ("best_of_k", "Rejection Sampling"),
+    ("best_of_k", "Best-of-K"),
     ("bootstrap_smc", "Bootstrap SMC"),
     ("exact_guidance_u", "Exact Guidance"),
 ]
@@ -1182,6 +1185,8 @@ def run_single_trial(
             n_steps=n_steps,
             initial_x=initial_pair_x,
             return_trajectory=return_trajectory,
+            alpha=alpha,
+            beta=beta,
         )
         elapsed = time.perf_counter() - t0
         x_final = out["final"][0]
@@ -1229,6 +1234,7 @@ def run_single_trial(
             n_steps=n_steps,
             initial_x=initial_pair_x,
             return_trajectory=return_trajectory,
+            alpha=alpha,
             beta=beta,
         )
         elapsed = time.perf_counter() - t0

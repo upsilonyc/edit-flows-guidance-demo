@@ -4,8 +4,8 @@ import numpy as np
 from Levenshtein import distance
 
 EPS = 1e-12
-BOS_TOKEN = 128
-PAD_TOKEN = 129
+BOS_TOKEN = 129
+PAD_TOKEN = 128
 GAP_TOKEN = 130
 # ===== util funcs for inference-time guidance =====
 # 1. reward function
