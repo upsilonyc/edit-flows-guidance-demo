@@ -1362,7 +1362,7 @@ import matplotlib.pyplot as plt
 N_eval = 20
 n_steps = 280
 n_particles_eval = 10
-betas = [10, 20]
+betas = [5, 25]
 _, in_dis_y, _, _, _, _ = make_batch(
         batch_size=batch_size,
         min_length=min_seq_len,
