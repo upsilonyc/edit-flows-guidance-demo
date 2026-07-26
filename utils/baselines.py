@@ -2,20 +2,19 @@ import torch
 import numpy as np
 # from main import min_seq_len, max_seq_len, make_batch, V, coupling, seq_align_fn, num_cycles_fn, x_int_fn
 from Levenshtein import distance
+from utils.utils import BOS_TOKEN, PAD_TOKEN, GAP_TOKEN
 
 EPS = 1e-12
-BOS_TOKEN = 129
-PAD_TOKEN = 128
-GAP_TOKEN = 130
 # ===== util funcs for inference-time guidance =====
 # 1. reward function
 
-def trim_pad(seq, pad_token: int = PAD_TOKEN):
+def trim_pad(seq, pad_token: int = PAD_TOKEN, bos_token: int = BOS_TOKEN):
+    """Trim structural tokens from sequences before reward or distance computations."""
     if torch.is_tensor(seq):
         values = seq.detach().cpu().tolist()
     else:
         values = list(seq)
-    return [int(v) for v in values if int(v) != pad_token]
+    return [int(v) for v in values if int(v) not in (pad_token, bos_token)]
 
 def tokens_to_lev_string(tokens):
     # Shift by +1 to avoid null chars while preserving token identity mapping.

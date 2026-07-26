@@ -1093,7 +1093,8 @@ def exact_guidance_u(
             return cache[key]
 
         for i in range(seq_len):
-            if int(x_t[b, i].item()) == PAD_TOKEN:
+            token_i = int(x_t[b, i].item())
+            if (i == 0 and token_i == BOS_TOKEN) or token_i == PAD_TOKEN:
                 u_ins_guided[b, i] = 0.0
                 u_sub_guided[b, i] = 0.0
                 u_del_guided[b, i] = 0.0
@@ -1433,7 +1434,7 @@ def _tokens_no_pad(x: torch.Tensor) -> list[int]:
     if x_cpu.ndim > 1:
         x_cpu = x_cpu[0]
     flat = x_cpu.reshape(-1)
-    return [int(tok) for tok in flat.tolist() if int(tok) != PAD_TOKEN]
+    return [int(tok) for tok in flat.tolist() if int(tok) not in (PAD_TOKEN, BOS_TOKEN)]
 
 
 def _sequence_target_label(target_name: str) -> str:
