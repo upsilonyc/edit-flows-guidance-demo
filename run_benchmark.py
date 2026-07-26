@@ -1094,7 +1094,8 @@ def exact_guidance_u(
 
         for i in range(seq_len):
             token_i = int(x_t[b, i].item())
-            if (i == 0 and token_i == BOS_TOKEN) or token_i == PAD_TOKEN:
+            # if (i == 0 and token_i == BOS_TOKEN) or token_i == PAD_TOKEN:
+            if token_i == PAD_TOKEN: 
                 u_ins_guided[b, i] = 0.0
                 u_sub_guided[b, i] = 0.0
                 u_del_guided[b, i] = 0.0
