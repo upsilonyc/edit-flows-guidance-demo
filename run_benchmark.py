@@ -1086,6 +1086,19 @@ def exact_guidance_u(
         base_reward = max(edit_distance_reward(x_tokens, target_y, alpha=alpha), EPS)
         cache: Dict[tuple, float] = {}
 
+        # Map x_t positions (with BOS/PAD) to compact reward-token positions (without BOS/PAD).
+        compact_pos_by_xt_index: Dict[int, int] = {}
+        compact_pos = 0
+        for i in range(seq_len):
+            tok_i = int(x_t[b, i].item())
+            if tok_i in (BOS_TOKEN, PAD_TOKEN):
+                continue
+            compact_pos_by_xt_index[i] = compact_pos
+            compact_pos += 1
+
+        # Do not guide insertion/substitution toward structural tokens that are ignored by reward.
+        semantic_tokens = [tok for tok in range(vocab_size) if tok not in (BOS_TOKEN, PAD_TOKEN)]
+
         def cached_reward(tokens):
             key = tuple(tokens)
             if key not in cache:
@@ -1094,23 +1107,29 @@ def exact_guidance_u(
 
         for i in range(seq_len):
             token_i = int(x_t[b, i].item())
-            # if (i == 0 and token_i == BOS_TOKEN) or token_i == PAD_TOKEN:
-            if token_i == PAD_TOKEN: 
+            if token_i in (BOS_TOKEN, PAD_TOKEN):
                 u_ins_guided[b, i] = 0.0
                 u_sub_guided[b, i] = 0.0
                 u_del_guided[b, i] = 0.0
                 continue
 
-            ins_rates = u_ins[b, i].clone()
-            sub_rates = u_sub[b, i].clone()
+            pos = compact_pos_by_xt_index.get(i, None)
+            if pos is None or pos >= len(x_tokens):
+                u_ins_guided[b, i] = 0.0
+                u_sub_guided[b, i] = 0.0
+                u_del_guided[b, i] = 0.0
+                continue
 
-            for tok in range(vocab_size):
-                x_ins = _virtual_apply_edit(x_tokens, "ins", i, tok)
-                x_sub = _virtual_apply_edit(x_tokens, "sub", i, tok)
-                ins_rates[tok] *= (float(cached_reward(x_ins) / base_reward)) ** beta
-                sub_rates[tok] *= (float(cached_reward(x_sub) / base_reward)) ** beta
+            ins_rates = torch.zeros_like(u_ins[b, i])
+            sub_rates = torch.zeros_like(u_sub[b, i])
 
-            x_del = _virtual_apply_edit(x_tokens, "del", i)
+            for tok in semantic_tokens:
+                x_ins = _virtual_apply_edit(x_tokens, "ins", pos, tok)
+                x_sub = _virtual_apply_edit(x_tokens, "sub", pos, tok)
+                ins_rates[tok] = u_ins[b, i, tok] * (float(cached_reward(x_ins) / base_reward)) ** beta
+                sub_rates[tok] = u_sub[b, i, tok] * (float(cached_reward(x_sub) / base_reward)) ** beta
+
+            x_del = _virtual_apply_edit(x_tokens, "del", pos)
             del_ratio = (float(cached_reward(x_del) / base_reward)) ** beta
 
             u_ins_guided[b, i] = torch.clamp(ins_rates, min=0.0)
