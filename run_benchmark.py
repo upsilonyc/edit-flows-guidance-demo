@@ -1107,8 +1107,20 @@ def exact_guidance_u(
 
         for i in range(seq_len):
             token_i = int(x_t[b, i].item())
-            if token_i in (BOS_TOKEN, PAD_TOKEN):
+            if token_i == PAD_TOKEN:
                 u_ins_guided[b, i] = 0.0
+                u_sub_guided[b, i] = 0.0
+                u_del_guided[b, i] = 0.0
+                continue
+
+            if token_i == BOS_TOKEN:
+                # Keep BOS immutable for sub/del, but allow insertions after BOS.
+                ins_rates = torch.zeros_like(u_ins[b, i])
+                for tok in semantic_tokens:
+                    x_ins = _virtual_apply_edit(x_tokens, "ins", -1, tok)
+                    ins_rates[tok] = u_ins[b, i, tok] * (float(cached_reward(x_ins) / base_reward)) ** beta
+
+                u_ins_guided[b, i] = torch.clamp(ins_rates, min=0.0)
                 u_sub_guided[b, i] = 0.0
                 u_del_guided[b, i] = 0.0
                 continue
