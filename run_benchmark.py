@@ -1408,6 +1408,7 @@ def benchmark_methods(
 # %%
 # Single-pass evaluation over (method, beta, target) with cached trial metrics for plotting
 import matplotlib.pyplot as plt
+import re
 
 N_eval = 20
 n_steps = 280
@@ -1434,14 +1435,48 @@ results_dfs = []
 all_summary_dfs = []
 all_trial_dfs = []
 trajectory_artifact = None
+trajectory_rows = []
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
+
+
+def _trajectory_to_rows(captured: dict) -> list[dict]:
+    rows = []
+    trajectory = captured.get("trajectory", None)
+    if trajectory is None:
+        return rows
+
+    for step_idx, x_t in enumerate(trajectory):
+        x_cpu = x_t.detach().cpu()
+        if x_cpu.ndim == 1:
+            x_cpu = x_cpu.unsqueeze(0)
+
+        for sample_idx in range(x_cpu.shape[0]):
+            full_tokens = [int(tok) for tok in x_cpu[sample_idx].tolist()]
+            semantic_tokens = [tok for tok in full_tokens if tok not in (PAD_TOKEN, BOS_TOKEN)]
+            rows.append(
+                {
+                    "target": str(captured["target"]),
+                    "beta": int(captured["beta"]),
+                    "method_key": str(captured["method_key"]),
+                    "step": int(step_idx),
+                    "sample_idx": int(sample_idx),
+                    "seq_len_full": int(len(full_tokens)),
+                    "seq_len_semantic": int(len(semantic_tokens)),
+                    "tokens_full_json": json.dumps(full_tokens),
+                    "tokens_semantic_json": json.dumps(semantic_tokens),
+                }
+            )
+    return rows
 
 for target_name, y_target in ys:
     eval_pairs = [(paired_x0, y_target) for _ in range(N_eval)]
 
     for b in betas:
-        capture_spec = None
-        if target_name == "OOD Sine" and b == 15:
-            capture_spec = {"method_key": "exact_guidance_u", "trial_idx": 0}
+        # Capture one exact-guidance trajectory per (target, beta) combination.
+        capture_spec = {"method_key": "exact_guidance_u", "trial_idx": 0}
 
         summary_df, trial_df, captured = benchmark_methods(
             N_eval=N_eval,
@@ -1464,11 +1499,21 @@ for target_name, y_target in ys:
 
         if captured is not None:
             trajectory_artifact = captured
+            trajectory_rows.extend(_trajectory_to_rows(captured))
+
+            traj_dir = Path("results") / "benchmark" / "trajectories"
+            traj_dir.mkdir(parents=True, exist_ok=True)
+            traj_file = traj_dir / f"target_{_slug(target_name)}_beta_{int(b)}.csv"
+            pd.DataFrame(_trajectory_to_rows(captured)).to_csv(traj_file, index=False)
+            print(f"Saved trajectory CSV: {traj_file}")
 
 summary_results_df = pd.concat(all_summary_dfs, ignore_index=True)
 trial_results_df = pd.concat(all_trial_dfs, ignore_index=True)
 summary_results_df.to_csv('summary_280.csv', index=False)
 trial_results_df.to_csv('trials_280.csv', index=False)
+
+if trajectory_rows:
+    pd.DataFrame(trajectory_rows).to_csv("trajectories_280.csv", index=False)
 
 # %%
 # Save sequences for visualization:
