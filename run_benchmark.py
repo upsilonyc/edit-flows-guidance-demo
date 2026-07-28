@@ -1083,7 +1083,18 @@ def exact_guidance_u(
 
     for b in range(batch_size):
         x_tokens = trim_pad(x_t[b])
-        base_reward = max(edit_distance_reward(x_tokens, target_y, alpha=alpha), EPS)
+        y_tokens = trim_pad(target_y)
+
+        def aligned_edit_reward(tokens):
+            """Guidance reward tied to aligned Levenshtein edit-distance objective."""
+            if len(tokens) == 0 and len(y_tokens) == 0:
+                return 1.0
+            x_str = tokens_to_lev_string(tokens)
+            y_str = tokens_to_lev_string(y_tokens)
+            d = distance(x_str, y_str)
+            return float(np.exp(-alpha * (d / L)))
+
+        base_reward = max(aligned_edit_reward(x_tokens), EPS)
         cache: Dict[tuple, float] = {}
 
         # Map x_t positions (with BOS/PAD) to compact reward-token positions (without BOS/PAD).
@@ -1102,7 +1113,7 @@ def exact_guidance_u(
         def cached_reward(tokens):
             key = tuple(tokens)
             if key not in cache:
-                cache[key] = edit_distance_reward(tokens, target_y, alpha=alpha)
+                cache[key] = aligned_edit_reward(tokens)
             return cache[key]
 
         for i in range(seq_len):
@@ -1436,7 +1447,7 @@ for target_name, y_target in ys:
             N_eval=N_eval,
             n_steps=n_steps,
             n_particles=n_particles_eval,
-            alpha=1,
+            alpha=5,
             max_rejection_attempts=10,
             show_progress=True,
             beta=b,
