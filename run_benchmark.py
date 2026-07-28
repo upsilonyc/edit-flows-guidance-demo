@@ -1325,7 +1325,7 @@ def benchmark_methods(
 
     rows = []
     trial_rows = []
-    captured_artifact = None
+    captured = None
 
     for method_key in method_keys:
         method_label = METHOD_KEY_TO_LABEL[method_key]
@@ -1376,7 +1376,7 @@ def benchmark_methods(
             )
 
             if should_capture:
-                captured_artifact = {
+                captured = {
                     "method_key": method_key,
                     "method": method_label,
                     "beta": int(beta),
@@ -1402,7 +1402,7 @@ def benchmark_methods(
 
     summary_df = pd.DataFrame(rows)
     if return_trials:
-        return summary_df, pd.DataFrame(trial_rows), captured_artifact
+        return summary_df, pd.DataFrame(trial_rows), captured
     return summary_df
 
 # %%
