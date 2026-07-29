@@ -1413,7 +1413,7 @@ import re
 N_eval = 20
 n_steps = 280
 n_particles_eval = 10
-betas = [5, 25]
+betas = [20, 25]
 _, in_dis_y, _, _, _, _ = make_batch(
         batch_size=batch_size,
         min_length=min_seq_len,
@@ -1482,7 +1482,7 @@ for target_name, y_target in ys:
             N_eval=N_eval,
             n_steps=n_steps,
             n_particles=n_particles_eval,
-            alpha=5,
+            alpha=15,
             max_rejection_attempts=10,
             show_progress=True,
             beta=b,
