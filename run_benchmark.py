@@ -638,19 +638,46 @@ if load_model:
 # - Using Pearson correlaton between dynamic time-warped sequences: Compared to the previous reward function, this reflects the quantitative distances between x and y, and account for phase shifts. x and y are first aligned using Dynamic Time Warping (DTW) to wx and wy, which are of equal length, then we compute the Pearson correlation between x and y to normalize the reward. 
 
 # %%
-# reward func using Levenshtein distance
+# reward funcs
 from Levenshtein import distance
 from utils.baselines import *
 from tslearn.metrics import dtw_path
 
-lev = True
+lev = False
 
-def levenshtein(x, y, alpha=5): # (0, 1]
+AlphaType = int | float | list[float] | tuple[float, float]
+
+
+def _alpha_scalar(alpha: AlphaType) -> float:
+    if isinstance(alpha, (list, tuple)):
+        return float(alpha[0])
+    return float(alpha)
+
+
+def _alpha_pair(alpha: AlphaType, default_alpha2: float = 0.2) -> tuple[float, float]:
+    if isinstance(alpha, (list, tuple)):
+        if len(alpha) == 0:
+            return 15.0, default_alpha2
+        if len(alpha) == 1:
+            return float(alpha[0]), default_alpha2
+        return float(alpha[0]), float(alpha[1])
+    return float(alpha), default_alpha2
+
+def levenshtein(x, y, alpha: AlphaType = 5): # (0, 1]
+    alpha_val = _alpha_scalar(alpha)
     d = distance(x, y)
     d = d / L
-    return np.exp(-alpha * d)
+    return np.exp(-alpha_val * d)
 
-def dtw(x, y, alpha):
+def levenshtein_L(x, y, alpha: AlphaType = (15.0, 0.2)): # (0, 1]
+    alpha1, alpha2 = _alpha_pair(alpha)
+    d = distance(x, y) / L
+    tx, ty = trim_pad(x), trim_pad(y)
+    d_L = abs(len(tx) - len(ty))
+    return np.exp(-alpha1 * d - alpha2 * d_L)
+
+def dtw(x, y, alpha: AlphaType):
+    alpha_val = _alpha_scalar(alpha)
     x_arr = np.asarray(x, dtype=np.float32)
     y_arr = np.asarray(y, dtype=np.float32)
     path, d = dtw_path(x_arr, y_arr)
@@ -662,15 +689,15 @@ def dtw(x, y, alpha):
     #     return EPS
     # corr = np.corrcoef(wx, wy)[0, 1]
     d = d / L
-    return np.exp(-alpha * d)
+    return np.exp(-alpha_val * d)
 
 reward = None
 if lev:
     reward = levenshtein
 else:
-    reward = dtw
+    reward = levenshtein_L
     
-def edit_distance_reward(x, y, alpha: int = 5) -> float:
+def edit_distance_reward(x, y, alpha) -> float:
     """Wrapper around the existing reward() function with robust token handling."""
     x_tokens = trim_pad(x)
     y_tokens = trim_pad(y)
@@ -681,6 +708,9 @@ def edit_distance_reward(x, y, alpha: int = 5) -> float:
         x_str = tokens_to_lev_string(x_tokens)
         y_str = tokens_to_lev_string(y_tokens)
         return float(reward(x_str, y_str, alpha=alpha)) # type: ignore
+
+    if reward is levenshtein_L:
+        return float(reward(x_tokens, y_tokens, alpha=alpha)) # type: ignore
 
     x_arr = np.asarray(x_tokens, dtype=np.float32)
     y_arr = np.asarray(y_tokens, dtype=np.float32)
@@ -769,7 +799,7 @@ def _ctmc_step(
     guidance: Optional[Callable] = None,
     target_y: Optional[torch.Tensor] = None,
     return_logprob: bool = False,
-    alpha: int = 5,
+    alpha: AlphaType = 5,
     beta: int = 5
 ):
     """Single Euler-CTMC step shared by all methods."""
@@ -877,7 +907,7 @@ def sample(
     n_steps: int = 1000,
     initial_x: Optional[torch.Tensor] = None,
     return_trajectory: bool = False,
-    alpha: int = 5,  # reward function parameter for guidance
+    alpha: AlphaType = 5,  # reward function parameter for guidance
     beta: int = 5 # reward sharpening
 ):
     """Shared sampler for unguided and guided inference, from x0 to x1."""
@@ -925,7 +955,7 @@ def best_of_k(
     target_y: torch.Tensor,
     initial_x: torch.Tensor,
     n_steps: int = 1000,
-    alpha: int = 10,
+    alpha: AlphaType = 10,
     max_attempts: int = 20,
 ):
     """Best_of_k sampling, as a baseline."""
@@ -954,7 +984,7 @@ def bootstrap_smc_sample(
     n_particles: int = 8,
     n_steps: int = 1000,
     ess_threshold: Optional[float] = None,
-    alpha: int = 5,
+    alpha: AlphaType = 5,
     beta: int = 5
 ):
     """Bootstrap SMC using the base model as the proposal, starting all particles from the same paired initial_x."""
@@ -1048,7 +1078,7 @@ def exact_guidance_u(
     ins_probs: torch.Tensor,
     sub_probs: torch.Tensor,
     target_y: torch.Tensor,
-    alpha: int = 5, # reward function parameter
+    alpha: AlphaType = 5, # reward function parameter
     beta: int = 5 # reward sharpening
     ):
     """
@@ -1208,13 +1238,21 @@ METHOD_KEY_TO_LABEL = {k: v for k, v in METHOD_SPECS}
 METHOD_LABEL_TO_KEY = {v: k for k, v in METHOD_SPECS}
 
 
+def _tokens_no_pad(x: torch.Tensor) -> list[int]:
+    x_cpu = x.detach().cpu()
+    if x_cpu.ndim > 1:
+        x_cpu = x_cpu[0]
+    flat = x_cpu.reshape(-1)
+    return [int(tok) for tok in flat.tolist() if int(tok) not in (PAD_TOKEN, BOS_TOKEN)]
+
+
 def run_single_trial(
     method_key: str,
     target_pair_y: torch.Tensor,
     initial_pair_x: torch.Tensor,
     n_steps: int,
     n_particles: int,
-    alpha: int,
+    alpha: AlphaType,
     max_rejection_attempts: int,
     beta: int,
     return_trajectory: bool = False,
@@ -1306,7 +1344,7 @@ def benchmark_methods(
     N_eval: int = 30,
     n_steps: int = 1000,
     n_particles: int = 8,
-    alpha: int = 10,
+    alpha: AlphaType = 10,
     max_rejection_attempts: int = 20,
     show_progress: bool = True,
     beta: int = 5,
@@ -1372,6 +1410,7 @@ def benchmark_methods(
                     "logprob": float(trial["logprob"]),
                     "edit_distance": float(trial["edit_distance"]),
                     "normalized_edit_distance": float(trial["normalized_edit_distance"]),
+                    "x_final_tokens_json": json.dumps(_tokens_no_pad(trial["x_final"])),
                 }
             )
 
@@ -1412,8 +1451,8 @@ import re
 
 N_eval = 20
 n_steps = 350
-n_particles_eval = 10
-betas = [20, 25]
+n_particles_eval = 500
+betas = [10]
 _, in_dis_y, _, _, _, _ = make_batch(
         batch_size=batch_size,
         min_length=min_seq_len,
@@ -1517,14 +1556,6 @@ if trajectory_rows:
 
 # %%
 # Save sequences for visualization:
-def _tokens_no_pad(x: torch.Tensor) -> list[int]:
-    x_cpu = x.detach().cpu()
-    if x_cpu.ndim > 1:
-        x_cpu = x_cpu[0]
-    flat = x_cpu.reshape(-1)
-    return [int(tok) for tok in flat.tolist() if int(tok) not in (PAD_TOKEN, BOS_TOKEN)]
-
-
 def _sequence_target_label(target_name: str) -> str:
     if target_name == "In-Distribution":
         return "in_dis_y"
@@ -1556,29 +1587,26 @@ for target_name, y_target in ys:
         }
     )
 
-    for b in betas:
-        for method_key, method_label in METHOD_SPECS:
-            representative_trial = run_single_trial(
-                method_key=method_key,
-                target_pair_y=y_target,
-                initial_pair_x=paired_x0.unsqueeze(0),
-                n_steps=n_steps,
-                n_particles=n_particles_eval,
-                alpha=1,
-                max_rejection_attempts=10,
-                beta=b,
-                return_trajectory=False,
-            )
-            representative_rows.append(
-                {
-                    "record_type": "generated",
-                    "method_key": method_key,
-                    "method": method_label,
-                    "beta": int(b),
-                    "target": target_label,
-                    "sequence_json": json.dumps(_tokens_no_pad(representative_trial["x_final"])),
-                }
-            )
+best_trials_df = (
+    trial_results_df.sort_values(
+        ["target", "beta", "method_key", "normalized_edit_distance", "trial"],
+        ascending=[True, True, True, True, True],
+    )
+    .groupby(["target", "beta", "method_key"], as_index=False)
+    .first()
+)
+
+for _, row in best_trials_df.iterrows():
+    representative_rows.append(
+        {
+            "record_type": "generated",
+            "method_key": str(row["method_key"]),
+            "method": str(row["method"]),
+            "beta": int(row["beta"]),
+            "target": _sequence_target_label(str(row["target"])),
+            "sequence_json": str(row["x_final_tokens_json"]),
+        }
+    )
 
 sequences_df = pd.DataFrame(representative_rows)
 sequences_df.to_csv("sequences_280.csv", index=False)
