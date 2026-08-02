@@ -1411,7 +1411,7 @@ import matplotlib.pyplot as plt
 import re
 
 N_eval = 20
-n_steps = 280
+n_steps = 350
 n_particles_eval = 10
 betas = [20, 25]
 _, in_dis_y, _, _, _, _ = make_batch(
