@@ -638,7 +638,7 @@ if load_model:
 # - Using Pearson correlaton between dynamic time-warped sequences: Compared to the previous reward function, this reflects the quantitative distances between x and y, and account for phase shifts. x and y are first aligned using Dynamic Time Warping (DTW) to wx and wy, which are of equal length, then we compute the Pearson correlation between x and y to normalize the reward. 
 
 # %%
-# reward funcs
+# reward funcs using Levenshtein distance
 from Levenshtein import distance
 from utils.baselines import *
 from tslearn.metrics import dtw_path
@@ -663,18 +663,20 @@ def _alpha_pair(alpha: AlphaType, default_alpha2: float = 0.2) -> tuple[float, f
         return float(alpha[0]), float(alpha[1])
     return float(alpha), default_alpha2
 
+
 def levenshtein(x, y, alpha: AlphaType = 5): # (0, 1]
     alpha_val = _alpha_scalar(alpha)
     d = distance(x, y)
     d = d / L
     return np.exp(-alpha_val * d)
 
+
 def levenshtein_L(x, y, alpha: AlphaType = (15.0, 0.2)): # (0, 1]
     alpha1, alpha2 = _alpha_pair(alpha)
     d = distance(x, y) / L
-    tx, ty = trim_pad(x), trim_pad(y)
-    d_L = abs(len(tx) - len(ty))
+    d_L = abs(len(x) - len(y))
     return np.exp(-alpha1 * d - alpha2 * d_L)
+
 
 def dtw(x, y, alpha: AlphaType):
     alpha_val = _alpha_scalar(alpha)
@@ -691,26 +693,24 @@ def dtw(x, y, alpha: AlphaType):
     d = d / L
     return np.exp(-alpha_val * d)
 
+
 reward = None
 if lev:
     reward = levenshtein
 else:
     reward = levenshtein_L
     
-def edit_distance_reward(x, y, alpha) -> float:
+def edit_distance_reward(x, y, alpha: AlphaType) -> float:
     """Wrapper around the existing reward() function with robust token handling."""
     x_tokens = trim_pad(x)
     y_tokens = trim_pad(y)
     if len(x_tokens) == 0 and len(y_tokens) == 0:
         return 1.0
 
-    if lev:
+    if (lev) or (reward is levenshtein_L):
         x_str = tokens_to_lev_string(x_tokens)
         y_str = tokens_to_lev_string(y_tokens)
         return float(reward(x_str, y_str, alpha=alpha)) # type: ignore
-
-    if reward is levenshtein_L:
-        return float(reward(x_tokens, y_tokens, alpha=alpha)) # type: ignore
 
     x_arr = np.asarray(x_tokens, dtype=np.float32)
     y_arr = np.asarray(y_tokens, dtype=np.float32)
@@ -1134,8 +1134,16 @@ def exact_guidance_u(
         def cached_reward(tokens):
             key = tuple(tokens)
             if key not in cache:
-                cache[key] = edit_distance_reward(x_t[b], target_y, alpha)
+                # Reward must be evaluated on the candidate token sequence, not current x_t.
+                cache[key] = max(float(edit_distance_reward(tokens, target_y, alpha)), EPS)
             return cache[key]
+
+        def reward_ratio(tokens):
+            # Use log-space ratio to avoid numerical collapse/overflow for tiny rewards.
+            cand_reward = cached_reward(tokens)
+            log_ratio = beta * (np.log(cand_reward) - np.log(base_reward))
+            log_ratio = float(np.clip(log_ratio, -30.0, 30.0))
+            return float(np.exp(log_ratio))
 
         for i in range(seq_len):
             token_i = int(x_t[b, i].item())
@@ -1150,7 +1158,7 @@ def exact_guidance_u(
                 ins_rates = torch.zeros_like(u_ins[b, i])
                 for tok in semantic_tokens:
                     x_ins = _virtual_apply_edit(x_tokens, "ins", -1, tok)
-                    ins_rates[tok] = u_ins[b, i, tok] * (float(cached_reward(x_ins) / base_reward)) ** beta
+                    ins_rates[tok] = u_ins[b, i, tok] * reward_ratio(x_ins)
 
                 u_ins_guided[b, i] = torch.clamp(ins_rates, min=0.0)
                 u_sub_guided[b, i] = 0.0
@@ -1170,11 +1178,11 @@ def exact_guidance_u(
             for tok in semantic_tokens:
                 x_ins = _virtual_apply_edit(x_tokens, "ins", pos, tok)
                 x_sub = _virtual_apply_edit(x_tokens, "sub", pos, tok)
-                ins_rates[tok] = u_ins[b, i, tok] * (float(cached_reward(x_ins) / base_reward)) ** beta
-                sub_rates[tok] = u_sub[b, i, tok] * (float(cached_reward(x_sub) / base_reward)) ** beta
+                ins_rates[tok] = u_ins[b, i, tok] * reward_ratio(x_ins)
+                sub_rates[tok] = u_sub[b, i, tok] * reward_ratio(x_sub)
 
             x_del = _virtual_apply_edit(x_tokens, "del", pos)
-            del_ratio = (float(cached_reward(x_del) / base_reward)) ** beta
+            del_ratio = reward_ratio(x_del)
 
             u_ins_guided[b, i] = torch.clamp(ins_rates, min=0.0)
             u_sub_guided[b, i] = torch.clamp(sub_rates, min=0.0)
