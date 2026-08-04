@@ -671,11 +671,17 @@ def levenshtein(x, y, alpha: AlphaType = 5): # (0, 1]
     return np.exp(-alpha_val * d)
 
 
-def levenshtein_L(x, y, alpha: AlphaType = (15.0, 0.2)): # (0, 1]
-    alpha1, alpha2 = _alpha_pair(alpha)
+# def levenshtein_L(x, y, alpha: AlphaType = (15.0, 0.2)): # (0, 1], as of benchmark-11
+#     alpha1, alpha2 = _alpha_pair(alpha)
+#     d = distance(x, y) / L
+#     d_L = abs(len(x) - len(y))
+#     return np.exp(-alpha1 * d - alpha2 * d_L)
+
+def levenshtein_L(x, y, alpha = (22.0, 50.0), beta=10.0, L=128.0):
+    alpha1, alpha2 = alpha[0], alpha[1]
     d = distance(x, y) / L
-    d_L = abs(len(x) - len(y))
-    return np.exp(-alpha1 * d - alpha2 * d_L)
+    d_L = (len(x) - len(y)) / L
+    return np.exp(-alpha1 * d - alpha2 * (d_L ** 2))
 
 
 def dtw(x, y, alpha: AlphaType):
@@ -1366,7 +1372,7 @@ def benchmark_methods(
 
     for method_key in method_keys:
         method_label = METHOD_KEY_TO_LABEL[method_key]
-        times, rewards, logprobs, edit_ds, norm_edit_ds = [], [], [], [], []
+        times, rewards, logprobs, edit_ds, norm_edit_ds, seq_lens = [], [], [], [], [], []
         iterator = tqdm(eval_pairs, desc=f"Benchmark: {method_label}", leave=True) if show_progress else eval_pairs
 
         for trial_idx, (x0_pair, x1_pair) in enumerate(iterator):
@@ -1396,6 +1402,7 @@ def benchmark_methods(
             logprobs.append(trial["logprob"])
             edit_ds.append(trial["edit_distance"])
             norm_edit_ds.append(trial["normalized_edit_distance"])
+            seq_lens.append(int(len(_tokens_no_pad(trial["x_final"]))))
 
             trial_rows.append(
                 {
@@ -1409,6 +1416,7 @@ def benchmark_methods(
                     "logprob": float(trial["logprob"]),
                     "edit_distance": float(trial["edit_distance"]),
                     "normalized_edit_distance": float(trial["normalized_edit_distance"]),
+                    "generated_seq_len": int(len(_tokens_no_pad(trial["x_final"]))),
                     "x_final_tokens_json": json.dumps(_tokens_no_pad(trial["x_final"])),
                 }
             )
@@ -1435,6 +1443,7 @@ def benchmark_methods(
                 "avg_logprob": float(np.mean(logprobs)),
                 "avg_edit_distance": float(np.mean(edit_ds)),
                 "avg_normalized_edit_distance": float(np.mean(norm_edit_ds)),
+                "avg_generated_seq_len": float(np.mean(seq_lens)),
             }
         )
 
