@@ -807,6 +807,7 @@ def _ctmc_step(
     return_logprob: bool = False,
     alpha: AlphaType = 5,
     beta: int = 5,
+    top_k_percentile: Optional[float] = None,
     collect_pre_guidance_rates: Optional[dict[str, list[float]]] = None,
 ):
     """Single Euler-CTMC step shared by all methods."""
@@ -846,6 +847,7 @@ def _ctmc_step(
             target_y,
             alpha=alpha,
             beta=beta,
+            percentile=top_k_percentile,
         )
         if isinstance(guided, (tuple, list)) and len(guided) == 3: # exact_guidance_lambda
             lambda_ins, lambda_sub, lambda_del = guided
@@ -925,6 +927,7 @@ def sample(
     return_trajectory: bool = False,
     alpha: AlphaType = 5,  # reward function parameter for guidance
     beta: int = 5, # reward sharpening
+    top_k_percentile: Optional[float] = None,
     collect_pre_guidance_rates: Optional[dict[str, list[float]]] = None,
 ):
     """Shared sampler for unguided and guided inference, from x0 to x1."""
@@ -953,6 +956,7 @@ def sample(
             return_logprob=return_logprob,
             alpha=alpha,
             beta=beta,
+            top_k_percentile=top_k_percentile,
             collect_pre_guidance_rates=collect_pre_guidance_rates,
         )
         if return_trajectory:
@@ -1088,6 +1092,98 @@ def bootstrap_smc_sample(
         "time": float(time.perf_counter() - start),
     }
 
+def top_k_smc_sample(
+    target_y: torch.Tensor,
+    initial_x: torch.Tensor,
+    n_particles: int = 8,
+    n_steps: int = 1000,
+    ess_threshold: Optional[float] = None,
+    alpha: AlphaType = 5,
+    beta: int = 5,
+    percentile: float = 0.99,
+):
+    """SMC with top-k exact-guidance proposal; weights still use reward-ratio reweighting."""
+    from concurrent.futures import ThreadPoolExecutor
+    import os
+    if ess_threshold is None:
+        ess_threshold = n_particles / 2
+
+    start = time.perf_counter()
+    default_h = 1.0 / n_steps
+
+    if initial_x.dim() == 1:
+        initial_x = initial_x.unsqueeze(0)
+    particles = initial_x.detach().cpu().repeat(n_particles, 1)
+    t = torch.zeros(n_particles, 1)
+
+    logw = torch.zeros(n_particles)
+    traj_logprob = torch.zeros(n_particles)
+
+    n_workers = min(n_particles, max(1, os.cpu_count() or 1))
+
+    def _particle_reward(x_particle: torch.Tensor) -> float:
+        return float(edit_distance_reward(x_particle, target_y, alpha=alpha))
+
+    def _batch_rewards(xs: torch.Tensor, reward_power: int = 1) -> torch.Tensor:
+        if n_workers <= 1:
+            vals = [_particle_reward(xs[i]) for i in range(xs.shape[0])]
+        else:
+            vals = list(executor.map(_particle_reward, [xs[i] for i in range(xs.shape[0])]))
+        rewards = torch.tensor(vals, dtype=torch.float32)
+        if reward_power != 1:
+            rewards = rewards.pow(reward_power)
+        return rewards
+
+    executor = ThreadPoolExecutor(max_workers=n_workers) if n_workers > 1 else None
+    try:
+        curr_reward = _batch_rewards(particles, reward_power=1)
+
+        while t.max().item() <= (1.0 - default_h):
+            particles, t, step_lp = _ctmc_step(
+                x_t=particles,
+                t=t,
+                default_h=default_h,
+                guidance=top_k_exact_guidance_u,
+                target_y=target_y,
+                return_logprob=True,
+                alpha=alpha,
+                beta=beta,
+                top_k_percentile=percentile,
+            )
+            if step_lp is None:
+                step_lp = torch.zeros(n_particles)
+            traj_logprob += step_lp
+
+            next_reward = _batch_rewards(particles, reward_power=1)
+            logw += torch.log(next_reward.pow(beta) + EPS) - torch.log(curr_reward.pow(beta) + EPS)
+            curr_reward = next_reward
+
+            max_logw = torch.max(logw)
+            w = torch.exp(logw - max_logw)
+            w = w / w.sum()
+
+            if effective_sample_size(w) < ess_threshold:
+                idx = torch.multinomial(w, num_samples=n_particles, replacement=True)
+                particles = particles[idx]
+                traj_logprob = traj_logprob[idx]
+                curr_reward = curr_reward[idx]
+                logw = torch.zeros(n_particles)
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True)
+
+    max_logw = torch.max(logw)
+    final_w = torch.exp(logw - max_logw)
+    final_w = final_w / final_w.sum()
+    chosen_idx = int(torch.multinomial(final_w, num_samples=1).item())
+
+    return {
+        "final": particles[chosen_idx].clone(),
+        "logprob": float(traj_logprob[chosen_idx].item()),
+        "reward": float(curr_reward[chosen_idx].item()),
+        "time": float(time.perf_counter() - start),
+    }
+
 def exact_guidance_u(
     x_t: torch.Tensor,
     lambda_ins: torch.Tensor,
@@ -1096,8 +1192,12 @@ def exact_guidance_u(
     ins_probs: torch.Tensor,
     sub_probs: torch.Tensor,
     target_y: torch.Tensor,
-    alpha: AlphaType, # reward function parameter
-    beta, # reward sharpening
+    alpha: AlphaType = 5, # reward function parameter
+    beta: int = 5, # reward sharpening
+    percentile: Optional[float] = None,
+    guide_ins_mask: Optional[torch.Tensor] = None,
+    guide_sub_mask: Optional[torch.Tensor] = None,
+    guide_del_mask: Optional[torch.Tensor] = None,
     ):
     """
     Token-level exact guidance on CTMC rates u, then re-parameterize to (lambda, Q).
@@ -1179,12 +1279,19 @@ def exact_guidance_u(
 
             if token_i == BOS_TOKEN:
                 # Keep BOS immutable for sub/del, but allow insertions after BOS.
-                ins_rates = torch.zeros_like(u_ins[b, i])
-                for tok in semantic_tokens:
-                    x_ins = _virtual_apply_edit(x_tokens, "ins", -1, tok)
-                    ins_rates[tok] = u_ins[b, i, tok] * reward_ratio(x_ins)
-
-                u_ins_guided[b, i] = torch.clamp(ins_rates, min=0.0)
+                if guide_ins_mask is None:
+                    ins_rates = torch.zeros_like(u_ins[b, i])
+                    for tok in semantic_tokens:
+                        x_ins = _virtual_apply_edit(x_tokens, "ins", -1, tok)
+                        ins_rates[tok] = u_ins[b, i, tok] * reward_ratio(x_ins)
+                    u_ins_guided[b, i] = torch.clamp(ins_rates, min=0.0)
+                else:
+                    selected_ins = guide_ins_mask[b, i]
+                    for tok in semantic_tokens:
+                        if not bool(selected_ins[tok].item()):
+                            continue
+                        x_ins = _virtual_apply_edit(x_tokens, "ins", -1, tok)
+                        u_ins_guided[b, i, tok] = max(u_ins[b, i, tok] * reward_ratio(x_ins), 0.0)
                 u_sub_guided[b, i] = 0.0
                 u_del_guided[b, i] = 0.0
                 continue
@@ -1196,21 +1303,39 @@ def exact_guidance_u(
                 u_del_guided[b, i] = 0.0
                 continue
 
-            ins_rates = torch.zeros_like(u_ins[b, i])
-            sub_rates = torch.zeros_like(u_sub[b, i])
+            if guide_ins_mask is None:
+                ins_rates = torch.zeros_like(u_ins[b, i])
+                for tok in semantic_tokens:
+                    x_ins = _virtual_apply_edit(x_tokens, "ins", pos, tok)
+                    ins_rates[tok] = u_ins[b, i, tok] * reward_ratio(x_ins)
+                u_ins_guided[b, i] = torch.clamp(ins_rates, min=0.0)
+            else:
+                selected_ins = guide_ins_mask[b, i]
+                for tok in semantic_tokens:
+                    if not bool(selected_ins[tok].item()):
+                        continue
+                    x_ins = _virtual_apply_edit(x_tokens, "ins", pos, tok)
+                    u_ins_guided[b, i, tok] = max(u_ins[b, i, tok] * reward_ratio(x_ins), 0.0)
 
-            for tok in semantic_tokens:
-                x_ins = _virtual_apply_edit(x_tokens, "ins", pos, tok)
-                x_sub = _virtual_apply_edit(x_tokens, "sub", pos, tok)
-                ins_rates[tok] = u_ins[b, i, tok] * reward_ratio(x_ins)
-                sub_rates[tok] = u_sub[b, i, tok] * reward_ratio(x_sub)
+            if guide_sub_mask is None:
+                sub_rates = torch.zeros_like(u_sub[b, i])
+                for tok in semantic_tokens:
+                    x_sub = _virtual_apply_edit(x_tokens, "sub", pos, tok)
+                    sub_rates[tok] = u_sub[b, i, tok] * reward_ratio(x_sub)
+                u_sub_guided[b, i] = torch.clamp(sub_rates, min=0.0)
+            else:
+                selected_sub = guide_sub_mask[b, i]
+                for tok in semantic_tokens:
+                    if not bool(selected_sub[tok].item()):
+                        continue
+                    x_sub = _virtual_apply_edit(x_tokens, "sub", pos, tok)
+                    u_sub_guided[b, i, tok] = max(u_sub[b, i, tok] * reward_ratio(x_sub), 0.0)
 
-            x_del = _virtual_apply_edit(x_tokens, "del", pos)
-            del_ratio = reward_ratio(x_del)
-
-            u_ins_guided[b, i] = torch.clamp(ins_rates, min=0.0)
-            u_sub_guided[b, i] = torch.clamp(sub_rates, min=0.0)
-            u_del_guided[b, i] = torch.clamp(u_del[b, i] * max(del_ratio, 0.0), min=0.0)
+            should_guide_del = guide_del_mask is None or bool(guide_del_mask[b, i].item())
+            if should_guide_del:
+                x_del = _virtual_apply_edit(x_tokens, "del", pos)
+                del_ratio = reward_ratio(x_del)
+                u_del_guided[b, i] = torch.clamp(u_del[b, i] * max(del_ratio, 0.0), min=0.0)
 
     lambda_ins_guided = u_ins_guided.sum(dim=-1)
     lambda_sub_guided = u_sub_guided.sum(dim=-1)
@@ -1247,6 +1372,92 @@ def exact_guidance_u(
         sub_probs_guided,
     )
 
+def _rates_to_lambda_probs(
+    u_ins: torch.Tensor,
+    u_sub: torch.Tensor,
+    u_del: torch.Tensor,
+    ins_probs_fallback: torch.Tensor,
+    sub_probs_fallback: torch.Tensor,
+):
+    lambda_ins = u_ins.sum(dim=-1)
+    lambda_sub = u_sub.sum(dim=-1)
+    lambda_del = u_del
+
+    ins_probs = ins_probs_fallback / ins_probs_fallback.sum(dim=-1, keepdim=True).clamp_min(EPS)
+    sub_probs = sub_probs_fallback / sub_probs_fallback.sum(dim=-1, keepdim=True).clamp_min(EPS)
+
+    ins_positive = lambda_ins > EPS
+    sub_positive = lambda_sub > EPS
+
+    if ins_positive.any():
+        ins_probs[ins_positive] = u_ins[ins_positive] / (lambda_ins[ins_positive].unsqueeze(-1) + EPS)
+        ins_probs[ins_positive] = ins_probs[ins_positive] / ins_probs[ins_positive].sum(dim=-1, keepdim=True).clamp_min(EPS)
+
+    if sub_positive.any():
+        sub_probs[sub_positive] = u_sub[sub_positive] / (lambda_sub[sub_positive].unsqueeze(-1) + EPS)
+        sub_probs[sub_positive] = sub_probs[sub_positive] / sub_probs[sub_positive].sum(dim=-1, keepdim=True).clamp_min(EPS)
+
+    return lambda_ins, lambda_sub, lambda_del, ins_probs, sub_probs
+
+def top_k_exact_guidance_u(
+    x_t: torch.Tensor,
+    lambda_ins: torch.Tensor,
+    lambda_sub: torch.Tensor,
+    lambda_del: torch.Tensor,
+    ins_probs: torch.Tensor,
+    sub_probs: torch.Tensor,
+    target_y: torch.Tensor,
+    alpha: AlphaType = 5,
+    beta: int = 5,
+    percentile: Optional[float] = 0.99,
+):
+    """Apply exact guidance only on top-k unguided u-entries selected by percentile."""
+    p = 0.99 if percentile is None else float(percentile)
+    p = max(0.0, min(1.0, p))
+
+    u_ins = lambda_ins.unsqueeze(-1) * ins_probs
+    u_sub = lambda_sub.unsqueeze(-1) * sub_probs
+    u_del = lambda_del.clone()
+
+    active_mask = (x_t != PAD_TOKEN)
+    guide_ins_mask = torch.zeros_like(u_ins, dtype=torch.bool)
+    guide_sub_mask = torch.zeros_like(u_sub, dtype=torch.bool)
+    guide_del_mask = torch.zeros_like(u_del, dtype=torch.bool)
+
+    batch_size = x_t.shape[0]
+    for b in range(batch_size):
+        active = active_mask[b]
+        if not active.any():
+            continue
+
+        flat_scores = torch.cat([
+            u_ins[b, active].reshape(-1),
+            u_sub[b, active].reshape(-1),
+            u_del[b, active].reshape(-1),
+        ])
+        if flat_scores.numel() == 0:
+            continue
+
+        threshold = torch.quantile(flat_scores, p)
+        guide_ins_mask[b] = (u_ins[b] >= threshold) & active.unsqueeze(-1)
+        guide_sub_mask[b] = (u_sub[b] >= threshold) & active.unsqueeze(-1)
+        guide_del_mask[b] = (u_del[b] >= threshold) & active
+
+    return exact_guidance_u(
+        x_t=x_t,
+        lambda_ins=lambda_ins,
+        lambda_sub=lambda_sub,
+        lambda_del=lambda_del,
+        ins_probs=ins_probs,
+        sub_probs=sub_probs,
+        target_y=target_y,
+        alpha=alpha,
+        beta=beta,
+        guide_ins_mask=guide_ins_mask,
+        guide_sub_mask=guide_sub_mask,
+        guide_del_mask=guide_del_mask,
+    )
+
 # %%
 # Extended evaluation helpers (single-pass metrics + optional trajectory capture)
 from typing import Any
@@ -1256,6 +1467,8 @@ METHOD_SPECS = [
     ("best_of_k", "Best-of-K"),
     ("bootstrap_smc", "Bootstrap SMC"),
     ("exact_guidance_u", "Exact Guidance"),
+    ("top_k_smc", "Top-K SMC"),
+    ("top_k_exact_guidance_u", "Top-K Exact Guidance"),
 ]
 METHOD_KEY_TO_LABEL = {k: v for k, v in METHOD_SPECS}
 METHOD_LABEL_TO_KEY = {v: k for k, v in METHOD_SPECS}
@@ -1278,6 +1491,7 @@ def run_single_trial(
     alpha: AlphaType,
     max_rejection_attempts: int,
     beta: int,
+    top_k_percentile: float = 0.99,
     return_trajectory: bool = False,
     capture_pre_guidance_rates: bool = False,
 ):
@@ -1297,6 +1511,7 @@ def run_single_trial(
             return_trajectory=return_trajectory,
             alpha=alpha,
             beta=beta,
+            top_k_percentile=top_k_percentile,
             collect_pre_guidance_rates=pre_guidance_rates,
         )
         elapsed = time.perf_counter() - t0
@@ -1347,6 +1562,7 @@ def run_single_trial(
             return_trajectory=return_trajectory,
             alpha=alpha,
             beta=beta,
+            top_k_percentile=top_k_percentile,
             collect_pre_guidance_rates=pre_guidance_rates,
         )
         elapsed = time.perf_counter() - t0
@@ -1354,6 +1570,44 @@ def run_single_trial(
         lp = float(out["logprob"][0].item())
         r = float(edit_distance_reward(x_final, target_pair_y, alpha=alpha))
         trajectory = out["trajectory"] if return_trajectory else None
+
+    elif method_key == "top_k_exact_guidance_u":
+        t0 = time.perf_counter()
+        out = sample(
+            guidance=top_k_exact_guidance_u,
+            return_logprob=True,
+            target_y=target_pair_y,
+            n_samples=1,
+            n_steps=n_steps,
+            initial_x=initial_pair_x,
+            return_trajectory=return_trajectory,
+            alpha=alpha,
+            beta=beta,
+            top_k_percentile=top_k_percentile,
+            collect_pre_guidance_rates=pre_guidance_rates,
+        )
+        elapsed = time.perf_counter() - t0
+        x_final = out["final"][0]
+        lp = float(out["logprob"][0].item())
+        r = float(edit_distance_reward(x_final, target_pair_y, alpha=alpha))
+        trajectory = out["trajectory"] if return_trajectory else None
+
+    elif method_key == "top_k_smc":
+        out = top_k_smc_sample(
+            target_y=target_pair_y,
+            initial_x=initial_pair_x,
+            n_particles=n_particles,
+            n_steps=n_steps,
+            ess_threshold=n_particles / 2,
+            alpha=alpha,
+            beta=beta,
+            percentile=top_k_percentile,
+        )
+        elapsed = float(out["time"])
+        x_final = out["final"]
+        lp = float(out["logprob"])
+        r = float(out["reward"])
+        trajectory = None
 
     else:
         raise ValueError(f"Unknown method_key: {method_key}")
@@ -1381,13 +1635,14 @@ def benchmark_methods(
     max_rejection_attempts: int = 20,
     show_progress: bool = True,
     beta: int = 5,
+    top_k_percentile: float = 0.99,
     target_y: torch.Tensor = target_y,
     target_name: str = "target_y",
     eval_pairs: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None,
     method_keys: Optional[list[str]] = None,
     return_trials: bool = False,
     capture_trajectory: Optional[dict[str, Any]] = None,
-    capture_pre_guidance_u: bool = True,
+    capture_pre_guidance_u: bool = False,
 ):
     if method_keys is None:
         method_keys = [k for k, _ in METHOD_SPECS]
@@ -1423,8 +1678,9 @@ def benchmark_methods(
                 alpha=alpha,
                 max_rejection_attempts=max_rejection_attempts,
                 beta=beta,
+                top_k_percentile=top_k_percentile,
                 return_trajectory=should_capture,
-                capture_pre_guidance_rates=(capture_pre_guidance_u and method_key in {"unguided", "exact_guidance_u"}),
+                capture_pre_guidance_rates=(capture_pre_guidance_u and method_key in {"unguided", "exact_guidance_u", "top_k_exact_guidance_u"}),
             )
 
             times.append(trial["runtime"])
@@ -1434,25 +1690,25 @@ def benchmark_methods(
             norm_edit_ds.append(trial["normalized_edit_distance"])
             seq_lens.append(int(len(_tokens_no_pad(trial["x_final"]))))
 
-            trial_rows.append(
-                {
-                    "trial": int(trial_idx),
-                    "method_key": method_key,
-                    "method": method_label,
-                    "beta": int(beta),
-                    "target": target_name,
-                    "runtime": float(trial["runtime"]),
-                    "reward": float(trial["reward"]),
-                    "logprob": float(trial["logprob"]),
-                    "edit_distance": float(trial["edit_distance"]),
-                    "normalized_edit_distance": float(trial["normalized_edit_distance"]),
-                    "generated_seq_len": int(len(_tokens_no_pad(trial["x_final"]))),
-                    "x_final_tokens_json": json.dumps(_tokens_no_pad(trial["x_final"])),
-                    "rates_in_json": json.dumps(trial["rates_in"]),
-                    "rates_del_json": json.dumps(trial["rates_del"]),
-                    "rates_sub_json": json.dumps(trial["rates_sub"]),
-                }
-            )
+            trial_row = {
+                "trial": int(trial_idx),
+                "method_key": method_key,
+                "method": method_label,
+                "beta": int(beta),
+                "target": target_name,
+                "runtime": float(trial["runtime"]),
+                "reward": float(trial["reward"]),
+                "logprob": float(trial["logprob"]),
+                "edit_distance": float(trial["edit_distance"]),
+                "normalized_edit_distance": float(trial["normalized_edit_distance"]),
+                "generated_seq_len": int(len(_tokens_no_pad(trial["x_final"]))),
+                "x_final_tokens_json": json.dumps(_tokens_no_pad(trial["x_final"])),
+            }
+            if capture_pre_guidance_u:
+                trial_row["rates_in_json"] = json.dumps(trial["rates_in"])
+                trial_row["rates_del_json"] = json.dumps(trial["rates_del"])
+                trial_row["rates_sub_json"] = json.dumps(trial["rates_sub"])
+            trial_rows.append(trial_row)
 
             if should_capture:
                 captured = {
@@ -1494,6 +1750,8 @@ N_eval = 20
 n_steps = 280
 n_particles_eval = 500
 betas = [10]
+top_k_percentile = 0.8
+store_all_rates = False # turn this on to store the rate distributions
 _, in_dis_y, _, _, _, _ = make_batch(
         batch_size=batch_size,
         min_length=min_seq_len,
@@ -1562,15 +1820,17 @@ for target_name, y_target in ys:
             N_eval=N_eval,
             n_steps=n_steps,
             n_particles=n_particles_eval,
-            alpha=[22.0, 50.0],
+            alpha=[31.0, 41.0],
             max_rejection_attempts=10,
             show_progress=True,
             beta=b,
+            top_k_percentile=top_k_percentile,
             target_y=y_target,
             target_name=target_name,
             eval_pairs=eval_pairs,
             return_trials=True,
             capture_trajectory=capture_spec,
+            capture_pre_guidance_u=store_all_rates,
         )
 
         results_dfs.append(summary_df)
@@ -1592,19 +1852,20 @@ trial_results_df = pd.concat(all_trial_dfs, ignore_index=True)
 summary_results_df.to_csv('summary_280.csv', index=False)
 trial_results_df.to_csv('trials_280.csv', index=False)
 
-u_rates_df = trial_results_df[
-    trial_results_df["method_key"].isin(["unguided", "exact_guidance_u"])
-][[
-    "trial",
-    "method_key",
-    "method",
-    "beta",
-    "target",
-    "rates_in_json",
-    "rates_del_json",
-    "rates_sub_json",
-]].copy()
-u_rates_df.to_csv("u_rates_280.csv", index=False)
+# stores rates over steps
+# u_rates_df = trial_results_df[
+#     trial_results_df["method_key"].isin(["unguided", "exact_guidance_u"])
+# ][[
+#     "trial",
+#     "method_key",
+#     "method",
+#     "beta",
+#     "target",
+#     "rates_in_json",
+#     "rates_del_json",
+#     "rates_sub_json",
+# ]].copy()
+# u_rates_df.to_csv("u_rates_280.csv", index=False)
 
 if trajectory_rows:
     pd.DataFrame(trajectory_rows).to_csv("trajectories_280.csv", index=False)
@@ -1644,8 +1905,8 @@ for target_name, y_target in ys:
 
 best_trials_df = (
     trial_results_df.sort_values(
-        ["target", "beta", "method_key", "normalized_edit_distance", "trial"],
-        ascending=[True, True, True, True, True],
+        ["target", "beta", "method_key", "reward", "trial"],
+        ascending=[True, True, True, False, True],
     )
     .groupby(["target", "beta", "method_key"], as_index=False)
     .first()
