@@ -806,7 +806,8 @@ def _ctmc_step(
     target_y: Optional[torch.Tensor] = None,
     return_logprob: bool = False,
     alpha: AlphaType = 5,
-    beta: int = 5
+    beta: int = 5,
+    collect_pre_guidance_rates: Optional[dict[str, list[float]]] = None,
 ):
     """Single Euler-CTMC step shared by all methods."""
     x_t = x_t.detach().cpu()
@@ -824,6 +825,15 @@ def _ctmc_step(
     lambda_del = u_t[:, :, 2].detach().cpu()
     ins_probs = ins_probs.detach().cpu()
     sub_probs = sub_probs.detach().cpu()
+
+    # Capture raw u rates before any guidance modifies lambdas/probabilities.
+    if collect_pre_guidance_rates is not None:
+        active_mask = ~x_pad_mask
+        u_ins_raw = lambda_ins.unsqueeze(-1) * ins_probs
+        u_sub_raw = lambda_sub.unsqueeze(-1) * sub_probs
+        collect_pre_guidance_rates["rates_in"].extend(u_ins_raw[active_mask].reshape(-1).tolist())
+        collect_pre_guidance_rates["rates_sub"].extend(u_sub_raw[active_mask].reshape(-1).tolist())
+        collect_pre_guidance_rates["rates_del"].extend(lambda_del[active_mask].reshape(-1).tolist())
 
     if guidance is not None:
         guided = guidance(
@@ -914,7 +924,8 @@ def sample(
     initial_x: Optional[torch.Tensor] = None,
     return_trajectory: bool = False,
     alpha: AlphaType = 5,  # reward function parameter for guidance
-    beta: int = 5 # reward sharpening
+    beta: int = 5, # reward sharpening
+    collect_pre_guidance_rates: Optional[dict[str, list[float]]] = None,
 ):
     """Shared sampler for unguided and guided inference, from x0 to x1."""
     model.eval()
@@ -941,7 +952,8 @@ def sample(
             target_y=target_y,
             return_logprob=return_logprob,
             alpha=alpha,
-            beta = beta
+            beta=beta,
+            collect_pre_guidance_rates=collect_pre_guidance_rates,
         )
         if return_trajectory:
             trajectory.append(x_t.clone())
@@ -1123,7 +1135,7 @@ def exact_guidance_u(
         y_tokens = trim_pad(target_y)
 
         if not lev and len(x_tokens) < len(y_tokens) * 0.6:
-            a1 = alpha[0] # type:ignore
+            a1 = alpha[0] + alpha[1] # type:ignore
             alpha = (a1, 0)
             # use edit distance-only reward for short sequences to avoid inserting too many off-the-target tokens
             
@@ -1267,7 +1279,12 @@ def run_single_trial(
     max_rejection_attempts: int,
     beta: int,
     return_trajectory: bool = False,
+    capture_pre_guidance_rates: bool = False,
 ):
+    pre_guidance_rates = None
+    if capture_pre_guidance_rates:
+        pre_guidance_rates = {"rates_in": [], "rates_del": [], "rates_sub": []}
+
     if method_key == "unguided":
         t0 = time.perf_counter()
         out = sample(
@@ -1280,6 +1297,7 @@ def run_single_trial(
             return_trajectory=return_trajectory,
             alpha=alpha,
             beta=beta,
+            collect_pre_guidance_rates=pre_guidance_rates,
         )
         elapsed = time.perf_counter() - t0
         x_final = out["final"][0]
@@ -1329,6 +1347,7 @@ def run_single_trial(
             return_trajectory=return_trajectory,
             alpha=alpha,
             beta=beta,
+            collect_pre_guidance_rates=pre_guidance_rates,
         )
         elapsed = time.perf_counter() - t0
         x_final = out["final"][0]
@@ -1348,6 +1367,9 @@ def run_single_trial(
         "edit_distance": float(d),
         "normalized_edit_distance": float(d_norm),
         "trajectory": trajectory,
+        "rates_in": pre_guidance_rates["rates_in"] if pre_guidance_rates is not None else [],
+        "rates_del": pre_guidance_rates["rates_del"] if pre_guidance_rates is not None else [],
+        "rates_sub": pre_guidance_rates["rates_sub"] if pre_guidance_rates is not None else [],
     }
 
 
@@ -1365,6 +1387,7 @@ def benchmark_methods(
     method_keys: Optional[list[str]] = None,
     return_trials: bool = False,
     capture_trajectory: Optional[dict[str, Any]] = None,
+    capture_pre_guidance_u: bool = True,
 ):
     if method_keys is None:
         method_keys = [k for k, _ in METHOD_SPECS]
@@ -1401,6 +1424,7 @@ def benchmark_methods(
                 max_rejection_attempts=max_rejection_attempts,
                 beta=beta,
                 return_trajectory=should_capture,
+                capture_pre_guidance_rates=(capture_pre_guidance_u and method_key in {"unguided", "exact_guidance_u"}),
             )
 
             times.append(trial["runtime"])
@@ -1424,6 +1448,9 @@ def benchmark_methods(
                     "normalized_edit_distance": float(trial["normalized_edit_distance"]),
                     "generated_seq_len": int(len(_tokens_no_pad(trial["x_final"]))),
                     "x_final_tokens_json": json.dumps(_tokens_no_pad(trial["x_final"])),
+                    "rates_in_json": json.dumps(trial["rates_in"]),
+                    "rates_del_json": json.dumps(trial["rates_del"]),
+                    "rates_sub_json": json.dumps(trial["rates_sub"]),
                 }
             )
 
@@ -1565,6 +1592,20 @@ trial_results_df = pd.concat(all_trial_dfs, ignore_index=True)
 summary_results_df.to_csv('summary_280.csv', index=False)
 trial_results_df.to_csv('trials_280.csv', index=False)
 
+u_rates_df = trial_results_df[
+    trial_results_df["method_key"].isin(["unguided", "exact_guidance_u"])
+][[
+    "trial",
+    "method_key",
+    "method",
+    "beta",
+    "target",
+    "rates_in_json",
+    "rates_del_json",
+    "rates_sub_json",
+]].copy()
+u_rates_df.to_csv("u_rates_280.csv", index=False)
+
 if trajectory_rows:
     pd.DataFrame(trajectory_rows).to_csv("trajectories_280.csv", index=False)
 
@@ -1624,3 +1665,74 @@ for _, row in best_trials_df.iterrows():
 
 sequences_df = pd.DataFrame(representative_rows)
 sequences_df.to_csv("sequences_280.csv", index=False)
+
+# %%
+# Visualization: pre-guidance u-rate distributions (8 histograms)
+u_rates_path = Path("u_rates_280.csv")
+assert u_rates_path.exists(), f"Missing {u_rates_path}. Run the benchmarking cell first."
+
+u_rates_df = pd.read_csv(u_rates_path)
+
+
+def _parse_rate_list(json_str: str) -> list[float]:
+    if not isinstance(json_str, str) or json_str.strip() == "":
+        return []
+    return [float(v) for v in json.loads(json_str)]
+
+
+def _flatten_rate_lists(df: pd.DataFrame, col_name: str) -> np.ndarray:
+    merged: list[float] = []
+    for s in df[col_name].tolist():
+        merged.extend(_parse_rate_list(s))
+    if len(merged) == 0:
+        return np.asarray([], dtype=np.float64)
+    return np.asarray(merged, dtype=np.float64)
+
+
+fig, axes = plt.subplots(2, 4, figsize=(22, 10))
+method_order = [
+    ("unguided", "Unguided"),
+    ("exact_guidance_u", "Exact Guidance"),
+]
+metric_order = [
+    ("rates_in_json", "Insertion u"),
+    ("rates_del_json", "Deletion u"),
+    ("rates_sub_json", "Substitution u"),
+    ("rates_all", "All u"),
+]
+
+for row_idx, (method_key, method_label) in enumerate(method_order):
+    method_df = u_rates_df[u_rates_df["method_key"] == method_key]
+
+    rates_in = _flatten_rate_lists(method_df, "rates_in_json")
+    rates_del = _flatten_rate_lists(method_df, "rates_del_json")
+    rates_sub = _flatten_rate_lists(method_df, "rates_sub_json")
+    rates_all = np.concatenate([arr for arr in [rates_in, rates_del, rates_sub] if arr.size > 0]) if (
+        rates_in.size + rates_del.size + rates_sub.size
+    ) > 0 else np.asarray([], dtype=np.float64)
+
+    values_by_metric = {
+        "rates_in_json": rates_in,
+        "rates_del_json": rates_del,
+        "rates_sub_json": rates_sub,
+        "rates_all": rates_all,
+    }
+
+    for col_idx, (metric_key, metric_label) in enumerate(metric_order):
+        ax = axes[row_idx, col_idx]
+        vals = values_by_metric[metric_key]
+        if vals.size == 0:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center")
+            ax.set_axis_off()
+            continue
+
+        ax.hist(vals, bins=60, alpha=0.85)
+        ax.set_title(f"{method_label}: {metric_label}")
+        ax.set_xlabel("u rate value")
+        ax.set_ylabel("Frequency")
+        ax.grid(True, alpha=0.25)
+
+fig.suptitle("Pre-Guidance u-Rate Distributions", fontsize=16)
+fig.tight_layout()
+plt.savefig("u_rate_histograms_280.png")
+plt.show()
