@@ -1084,8 +1084,8 @@ def exact_guidance_u(
     ins_probs: torch.Tensor,
     sub_probs: torch.Tensor,
     target_y: torch.Tensor,
-    alpha: AlphaType = 5, # reward function parameter
-    beta: int = 5 # reward sharpening
+    alpha: AlphaType, # reward function parameter
+    beta, # reward sharpening
     ):
     """
     Token-level exact guidance on CTMC rates u, then re-parameterize to (lambda, Q).
@@ -1118,9 +1118,15 @@ def exact_guidance_u(
             print("CTMC residual max:", float(resid.abs().max().item()))
 
     for b in range(batch_size):
+
         x_tokens = trim_pad(x_t[b])
         y_tokens = trim_pad(target_y)
 
+        if not lev and len(x_tokens) < len(y_tokens) * 0.6:
+            a1 = alpha[0] # type:ignore
+            alpha = (a1, 0)
+            # use edit distance-only reward for short sequences to avoid inserting too many off-the-target tokens
+            
         base_reward = max(edit_distance_reward(x_t[b], target_y, alpha), EPS)
         cache: Dict[tuple, float] = {}
 
@@ -1529,7 +1535,7 @@ for target_name, y_target in ys:
             N_eval=N_eval,
             n_steps=n_steps,
             n_particles=n_particles_eval,
-            alpha=[15, 0.2],
+            alpha=[22.0, 50.0],
             max_rejection_attempts=10,
             show_progress=True,
             beta=b,
