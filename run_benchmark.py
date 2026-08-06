@@ -1234,12 +1234,13 @@ def exact_guidance_u(
         x_tokens = trim_pad(x_t[b])
         y_tokens = trim_pad(target_y)
 
+        alpha_for_particle = alpha
         if not lev and len(x_tokens) < len(y_tokens) * 0.6:
             a1 = alpha[0] + alpha[1] # type:ignore
-            alpha = (a1, 0)
+            alpha_for_particle = (a1, 0)
             # use edit distance-only reward for short sequences to avoid inserting too many off-the-target tokens
-            
-        base_reward = max(edit_distance_reward(x_t[b], target_y, alpha), EPS)
+
+        base_reward = max(edit_distance_reward(x_t[b], target_y, alpha_for_particle), EPS)
         cache: Dict[tuple, float] = {}
 
         # Map x_t positions (with BOS/PAD) to compact reward-token positions (without BOS/PAD).
@@ -1259,7 +1260,7 @@ def exact_guidance_u(
             key = tuple(tokens)
             if key not in cache:
                 # Reward must be evaluated on the candidate token sequence, not current x_t.
-                cache[key] = max(float(edit_distance_reward(tokens, target_y, alpha)), EPS)
+                cache[key] = max(float(edit_distance_reward(tokens, target_y, alpha_for_particle)), EPS)
             return cache[key]
 
         def reward_ratio(tokens):
@@ -1467,7 +1468,7 @@ METHOD_SPECS = [
     ("best_of_k", "Best-of-K"),
     ("bootstrap_smc", "Bootstrap SMC"),
     ("exact_guidance_u", "Exact Guidance"),
-    ("top_k_smc", "Top-K SMC"),
+    # ("top_k_smc", "Top-K SMC"),
     ("top_k_exact_guidance_u", "Top-K Exact Guidance"),
 ]
 METHOD_KEY_TO_LABEL = {k: v for k, v in METHOD_SPECS}
@@ -1748,7 +1749,7 @@ import re
 
 N_eval = 20
 n_steps = 280
-n_particles_eval = 500
+n_particles_eval = 300
 betas = [10]
 top_k_percentile = 0.8
 store_all_rates = False # turn this on to store the rate distributions
